@@ -1,0 +1,78 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Bump (patch, minor, major, prerelease) or explicit version
+        type: string
+        required: true
+      preid:
+        description: Optional prerelease identifier (lowercase letters)
+        type: string
+        required: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  GOWORK: 'off'
+
+jobs:
+  select:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      retry: ${{ steps.version.outputs.retry }}
+      ref: ${{ steps.ref.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - id: version
+        env:
+          VERSION: ${{ inputs.version }}
+          PREID: ${{ inputs.preid }}
+        run: bash scripts/release/next-version.sh >> "$GITHUB_OUTPUT"
+      - id: ref
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          RETRY: ${{ steps.version.outputs.retry }}
+        run: bash scripts/release/select-ref.sh >> "$GITHUB_OUTPUT"
+
+  checks:
+    needs: select
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.select.outputs.ref }}
+
+  publish:
+    needs: [select, checks]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.select.outputs.tag }}
+      RETRY: ${{ needs.select.outputs.retry }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.select.outputs.ref }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - if: env.RETRY == 'false'
+        run: git tag "$TAG" && git push origin "refs/tags/$TAG"
+      - run: bash scripts/release/create-release.sh
+      - run: GOPROXY=https://proxy.golang.org go list -m "$(go list -m)@$TAG"
